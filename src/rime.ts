@@ -75,6 +75,7 @@ function postMessage(message: Message) {
 const allActions: (keyof Actions)[] = [
 	"setOption",
 	"processKey",
+	"setInput",
 	"selectCandidate",
 	"deleteCandidate",
 	"flipPage",

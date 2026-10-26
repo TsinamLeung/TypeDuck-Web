@@ -5,6 +5,7 @@ const exportedFunctions = [
 	"_init",
 	"_set_option",
 	"_process_key",
+	"_set_input",
 	"_select_candidate",
 	"_delete_candidate",
 	"_flip_page",

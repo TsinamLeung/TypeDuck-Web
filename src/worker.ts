@@ -69,6 +69,9 @@ const actions: Actions = {
 		}
 		return result;
 	},
+	async setInput(input) {
+		return JSON.parse(Module.ccall("set_input", "string", ["string"], [input])) as RimeResult;
+	},
 	async selectCandidate(index) {
 		return JSON.parse(Module.ccall("select_candidate", "string", ["number"], [index])) as RimeResult;
 	},

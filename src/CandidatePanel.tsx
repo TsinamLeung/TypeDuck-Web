@@ -5,7 +5,7 @@ import CandidateInfo from "./CandidateInfo";
 import CaretFollower from "./CaretFollower";
 import { RIME_KEY_MAP } from "./consts";
 import DictionaryPanel from "./DictionaryPanel";
-import Rime from "./rime";
+import Rime, { subscribe } from "./rime";
 import { isPrintable, notify } from "./utils";
 
 import type { InputState, InterfacePreferences, RimeResult } from "./types";
@@ -20,19 +20,36 @@ export default function CandidatePanel({ runAsyncTask, textArea, prefs, deploySt
 	const [showDictionaryIndex, setShowDictionaryIndex] = useState<number | undefined>();
 	const candidateList = useRef<HTMLTableElement>(null);
 	const dictionaryPanel = useRef<HTMLDivElement>(null);
-	const composedText = useRef("");
+	const composition = useRef<{ value: string; selectionStart: number; selectionEnd: number; prefix: string; base?: string; input: string } | undefined>();
+	// Rime's input if it was last changed by `setInput`
+	const lastInput = useRef<string | undefined>();
+	const isASCIIMode = useRef(false);
 
 	const hideDictionary = useCallback(() => {
 		setShowDictionaryIndex(undefined);
 	}, [setShowDictionaryIndex]);
 
+	// Restore the textarea to how it was before the composition and return the text the keyboard inserted after the word it has passed to Rime
+	const endComposition = useCallback(() => {
+		if (!composition.current) return "";
+		const { value, selectionStart, selectionEnd, input } = composition.current;
+		composition.current = undefined;
+		const inserted = getInsertedText(value, textArea.value) ?? "";
+		textArea.value = value;
+		textArea.selectionStart = selectionStart;
+		textArea.selectionEnd = selectionEnd;
+		return inserted.startsWith(input) ? inserted.slice(input.length) : inserted;
+	}, [textArea]);
+
 	const insert = useCallback((newText: string) => {
+		endComposition();
 		const { selectionStart, selectionEnd } = textArea;
 		textArea.value = textArea.value.slice(0, selectionStart) + newText + textArea.value.slice(selectionEnd);
 		textArea.selectionStart = textArea.selectionEnd = selectionStart + newText.length;
-	}, [textArea]);
+	}, [endComposition, textArea]);
 
-	const handleRimeResult = useCallback((promise: Promise<RimeResult>, key?: string) =>
+	const handleRimeResult = useCallback((promise: Promise<RimeResult>, key?: string, input?: string) => {
+		lastInput.current = input;
 		runAsyncTask(async () => {
 			let type: "warning" | "error" | undefined;
 			try {
@@ -67,9 +84,11 @@ export default function CandidatePanel({ runAsyncTask, textArea, prefs, deploySt
 				notify(type, "執行操作", "performing the operation");
 			}
 			textArea.focus();
-		}), [hideDictionary, inputState, insert, runAsyncTask, textArea]);
+		});
+	}, [hideDictionary, inputState, insert, runAsyncTask, textArea]);
 
 	const processKey = useCallback((input: string, key?: string) => handleRimeResult(Rime.processKey(input), key), [handleRimeResult]);
+	const setInput = useCallback((input: string) => handleRimeResult(Rime.setInput(input), undefined, input), [handleRimeResult]);
 	const flipPage = useCallback((backward: boolean) => handleRimeResult(Rime.flipPage(backward)), [handleRimeResult]);
 	const selectCandidate = useCallback((index: number) => handleRimeResult(Rime.selectCandidate(index)), [handleRimeResult]);
 	const deleteCandidate = useCallback((index: number) => handleRimeResult(Rime.deleteCandidate(index)), [handleRimeResult]);
@@ -140,67 +159,83 @@ export default function CandidatePanel({ runAsyncTask, textArea, prefs, deploySt
 	}, [inputState, parseKey, processKey]);
 
 	useEffect(() => {
-		// Android virtual keyboards (e.g. Gboard) send `keydown` events with `key: "Unidentified"` and compose text into the textarea directly,
-		// so take back the characters they insert and pass them to Rime instead
+		// Android virtual keyboards (e.g. Gboard) send `keydown` events with `key: "Unidentified"` and compose words in the textarea directly,
+		// so pass the composed word to Rime as its input, and take back the other characters they insert to pass them to Rime as keys
 		let snapshot: { value: string; selectionStart: number; selectionEnd: number } | undefined;
+		function processKeys(keys: string) {
+			for (const key of keys) {
+				processKey(`{${RIME_KEY_MAP[key] || key}}`, key);
+			}
+		}
+		function onCompositionStart({ data }: CompositionEvent) {
+			if (!isASCIIMode.current) {
+				const { value, selectionStart, selectionEnd } = textArea;
+				// The keyboard may start the composition from an existing word next to the caret.
+				// If Rime's input is unknown, the composed word is passed as keys when the composition ends instead
+				composition.current = { value, selectionStart, selectionEnd, prefix: data, base: lastInput.current ?? (inputState ? undefined : ""), input: "" };
+			}
+		}
+		function onCompositionEnd() {
+			processKeys(endComposition());
+		}
 		function onBeforeInput() {
 			const { value, selectionStart, selectionEnd } = textArea;
 			snapshot = { value, selectionStart, selectionEnd };
 		}
 		function onInput(event: Event) {
-			const { inputType } = event as InputEvent;
-			if (!snapshot) return;
-			const { value, selectionStart, selectionEnd } = snapshot;
+			const { inputType, data } = event as InputEvent;
+			const state = snapshot;
 			snapshot = undefined;
-			const composed = composedText.current;
-			composedText.current = "";
-			let keys: string[] | undefined;
-			if (inputType === "insertText" || inputType === "insertCompositionText") {
-				let prefix = 0;
-				while (prefix < value.length && value[prefix] === textArea.value[prefix]) prefix++;
-				let suffix = 0;
-				while (suffix < value.length - prefix && value[value.length - 1 - suffix] === textArea.value[textArea.value.length - 1 - suffix]) suffix++;
-				const inserted = textArea.value.slice(prefix, textArea.value.length - suffix);
-				if (prefix + suffix === value.length && [...inserted].every(isPrintable)) {
-					const isComposition = inputType === "insertCompositionText";
-					// The keyboard may keep its own composition and send the whole word again on every keystroke, so only pass the difference
-					if (composed && inserted.startsWith(composed) && (inserted.length > composed.length || !isComposition)) {
-						keys = [...inserted.slice(composed.length)];
-					}
-					else if (composed && composed.startsWith(inserted) && inserted.length < composed.length && isComposition) {
-						keys = Array<string>(composed.length - inserted.length).fill("Backspace");
-					}
-					else if (inserted) {
-						keys = [...inserted];
-					}
-					if (isComposition) composedText.current = inserted;
+			if (inputType === "insertCompositionText") {
+				const input = data?.startsWith(composition.current?.prefix ?? "") ? data.slice(composition.current?.prefix.length) : undefined;
+				if (composition.current?.base !== undefined && input !== undefined && /^[a-z]*$/.test(input)) {
+					composition.current.input = input;
+					setInput(composition.current.base + input);
+				}
+				return;
+			}
+			if (!state || composition.current) return;
+			let keys: string | undefined;
+			if (inputType === "insertText") {
+				const inserted = getInsertedText(state.value, textArea.value);
+				if (inserted && [...inserted].every(isPrintable)) {
+					keys = inserted;
 				}
 			}
-			else if (inputState && inputType === "deleteContentBackward") {
-				keys = ["Backspace"];
-			}
-			else if (inputState && inputType === "insertLineBreak") {
-				keys = ["Enter"];
-			}
-			if (keys) {
-				textArea.value = value;
-				textArea.selectionStart = selectionStart;
-				textArea.selectionEnd = selectionEnd;
-				for (const key of keys) {
-					processKey(`{${RIME_KEY_MAP[key] || key}}`, key);
+			if (keys || inputState && (inputType === "deleteContentBackward" || inputType === "insertLineBreak")) {
+				textArea.value = state.value;
+				textArea.selectionStart = state.selectionStart;
+				textArea.selectionEnd = state.selectionEnd;
+				if (keys) {
+					processKeys(keys);
+				}
+				else {
+					processKey(inputType === "deleteContentBackward" ? "{BackSpace}" : "{Return}");
 				}
 			}
 		}
+		textArea.addEventListener("compositionstart", onCompositionStart);
+		textArea.addEventListener("compositionend", onCompositionEnd);
 		textArea.addEventListener("beforeinput", onBeforeInput);
 		textArea.addEventListener("input", onInput);
 		return () => {
+			textArea.removeEventListener("compositionstart", onCompositionStart);
+			textArea.removeEventListener("compositionend", onCompositionEnd);
 			textArea.removeEventListener("beforeinput", onBeforeInput);
 			textArea.removeEventListener("input", onInput);
 		};
-	}, [inputState, processKey, textArea]);
+	}, [endComposition, inputState, processKey, setInput, textArea]);
+
+	useEffect(() =>
+		subscribe("optionChanged", (option, value) => {
+			if (option === "ascii_mode") {
+				isASCIIMode.current = value;
+			}
+		}), []);
 
 	useEffect(() => {
 		setInputState(undefined);
+		lastInput.current = undefined;
 		hideDictionary();
 	}, [deployStatus, setInputState, hideDictionary]);
 
@@ -255,4 +290,13 @@ export default function CandidatePanel({ runAsyncTask, textArea, prefs, deploySt
 		</div>
 		{shouldShowDictionary && <DictionaryPanel info={inputState.candidates[showDictionaryIndex]} prefs={prefs} ref={dictionaryPanel} />}
 	</CaretFollower>;
+}
+
+// Return the text inserted into `oldValue` to make `newValue`, or `undefined` if anything was removed
+function getInsertedText(oldValue: string, newValue: string) {
+	let prefix = 0;
+	while (prefix < oldValue.length && oldValue[prefix] === newValue[prefix]) prefix++;
+	let suffix = 0;
+	while (suffix < oldValue.length - prefix && oldValue[oldValue.length - 1 - suffix] === newValue[newValue.length - 1 - suffix]) suffix++;
+	return prefix + suffix === oldValue.length ? newValue.slice(prefix, newValue.length - suffix) : undefined;
 }

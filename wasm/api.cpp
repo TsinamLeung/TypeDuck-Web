@@ -117,6 +117,10 @@ const char* process_key(const char* input) {
   return process(rime->simulate_key_sequence(session_id, input));
 }
 
+const char* set_input(const char* input) {
+  return process(rime->set_input(session_id, input));
+}
+
 const char* select_candidate(int index) {
   return process(rime->select_candidate_on_current_page(session_id, index));
 }

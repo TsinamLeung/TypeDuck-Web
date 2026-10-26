@@ -6,6 +6,7 @@ export interface RimeAPI {
 	init(): boolean;
 	set_option(option: string, value: number): void;
 	process_key(input: string): string;
+	set_input(input: string): string;
 	select_candidate(index: number): string;
 	delete_candidate(index: number): string;
 	flip_page(backward: boolean): string;
@@ -16,6 +17,7 @@ export interface RimeAPI {
 export interface Actions {
 	setOption(option: string, value: boolean): Promise<void>;
 	processKey(input: string): Promise<RimeResult>;
+	setInput(input: string): Promise<RimeResult>;
 	selectCandidate(index: number): Promise<RimeResult>;
 	deleteCandidate(index: number): Promise<RimeResult>;
 	flipPage(backward: boolean): Promise<RimeResult>;
